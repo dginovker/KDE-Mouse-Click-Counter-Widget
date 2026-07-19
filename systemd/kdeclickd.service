@@ -1,0 +1,26 @@
+[Unit]
+Description=Input analytics daemon for the Click Analytics widget
+Documentation=https://github.com/dginovker/KDEClickAnalytics
+
+[Service]
+Type=simple
+ExecStart=%h/.local/lib/kdeclick/kdeclickd.py
+Restart=on-failure
+RestartSec=5
+
+# Counting is timer-sensitive: libinput drives tap detection from its own
+# timers, and late dispatch silently loses taps.
+Nice=-5
+
+# The daemon only ever reads input devices and writes one SQLite file.
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/kdeclick
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
