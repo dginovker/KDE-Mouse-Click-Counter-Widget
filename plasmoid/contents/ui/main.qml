@@ -10,19 +10,26 @@ import org.kde.plasma.plasmoid
 PlasmoidItem {
     id: root
 
-    readonly property int refreshMs: 10 * 1000
-    readonly property string helperPath: fileUrlToPath(Qt.resolvedUrl("../code/stats_snapshot.py"))
-    readonly property var windows: [{"key": "today", "label": i18n("Today")}, {"key": "week", "label": i18n("Week")}, {"key": "all", "label": i18n("All time")}]
+    // The daemon precomputes state.json, so a refresh is a 2ms `cat` rather
+    // than a 33ms Python run, and the totals are live rather than lagging the
+    // database flush.
+    readonly property int refreshMs: 1000
 
-    property string activeWindow: "today"
+    property var totals: ({})
+    property var activity: ({})
+    property var peak: null
+    property real updated: 0
     property string activeSource: ""
-    property var snapshot: ({})
     property bool loading: false
     property string lastError: ""
 
-    readonly property var panelTotals: totalsFor(Plasmoid.configuration.panelWindow || "all")
-    readonly property real panelClicks: panelTotals.click_left || 0
-    readonly property real panelKeys: panelTotals.keystrokes || 0
+    readonly property bool available: updated > 0 && lastError.length === 0
+    // The daemon heartbeats every 30s whether or not anything was typed, so a
+    // gap this long means it died rather than that you sat still.
+    readonly property bool stale: available && (Date.now() / 1000 - updated) > 90
+
+    readonly property real clicks: metric("click_left")
+    readonly property real keys: metric("keystrokes")
 
     Plasmoid.title: i18n("Click Analytics")
     Plasmoid.icon: "input-mouse"
@@ -30,33 +37,30 @@ PlasmoidItem {
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
 
     toolTipMainText: i18n("Click Analytics")
-    toolTipSubText: snapshot.available === false
-        ? i18n("Daemon not running")
-        : i18n("%1 clicks · %2 keystrokes", formatFull(panelClicks), formatFull(panelKeys))
+    toolTipSubText: available
+        ? i18n("%1 clicks · %2 keystrokes", formatFull(clicks), formatFull(keys))
+        : i18n("Daemon not running")
 
     compactRepresentation: MouseArea {
         Layout.minimumWidth: counters.implicitWidth + Kirigami.Units.smallSpacing * 2
         Layout.preferredWidth: Layout.minimumWidth
         Layout.minimumHeight: Kirigami.Units.iconSizes.small * 2
 
-        onClicked: {
-            root.refreshData();
-            root.expanded = !root.expanded;
-        }
+        onClicked: root.expanded = !root.expanded
 
         CompactCounters {
             id: counters
             anchors.fill: parent
-            clicks: root.panelClicks
-            keys: root.panelKeys
-            available: root.snapshot.available !== false
-            stale: root.snapshot.stale === true
+            clicks: root.clicks
+            keys: root.keys
+            available: root.available
+            stale: root.stale
         }
     }
 
     fullRepresentation: PlasmaExtras.Representation {
         Layout.minimumWidth: Kirigami.Units.gridUnit * 21
-        Layout.minimumHeight: Kirigami.Units.gridUnit * 26
+        Layout.minimumHeight: Kirigami.Units.gridUnit * 24
         collapseMarginsHint: true
 
         ColumnLayout {
@@ -64,59 +68,23 @@ PlasmoidItem {
             anchors.margins: Kirigami.Units.largeSpacing
             spacing: Kirigami.Units.smallSpacing
 
-            RowLayout {
+            PlasmaComponents3.Label {
+                text: i18n("Input Analytics")
+                font.bold: true
                 Layout.fillWidth: true
-
-                PlasmaComponents3.Label {
-                    text: i18n("Input Analytics")
-                    font.bold: true
-                    Layout.fillWidth: true
-                }
-
-                Repeater {
-                    model: root.windows
-
-                    Rectangle {
-                        Layout.preferredWidth: chipLabel.implicitWidth + Kirigami.Units.largeSpacing
-                        Layout.preferredHeight: Kirigami.Units.gridUnit * 1.3
-                        radius: Kirigami.Units.cornerRadius
-                        color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, root.activeWindow === modelData.key ? 0.16 : 0.07)
-                        border.width: root.activeWindow === modelData.key ? 1 : 0
-                        border.color: Kirigami.Theme.highlightColor
-
-                        PlasmaComponents3.Label {
-                            id: chipLabel
-                            anchors.centerIn: parent
-                            text: modelData.label
-                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                            font.bold: root.activeWindow === modelData.key
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.activeWindow = modelData.key
-                        }
-                    }
-                }
             }
 
             PlasmaComponents3.Label {
-                visible: root.snapshot.available === false || root.lastError.length > 0
-                text: root.lastError.length > 0 ? root.lastError : (root.snapshot.error || "")
-                color: Kirigami.Theme.negativeTextColor
-                wrapMode: Text.WordWrap
-                Layout.fillWidth: true
-                Layout.topMargin: Kirigami.Units.smallSpacing
-            }
-
-            PlasmaComponents3.Label {
-                visible: root.snapshot.stale === true
-                text: i18n("Counts look stale — the daemon may have stopped.")
-                color: Kirigami.Theme.neutralTextColor
+                visible: !root.available || root.stale
+                text: root.stale
+                    ? i18n("Counts look stale — the daemon may have stopped.")
+                    : i18n("Daemon not running. Check: systemctl --user status kdeclickd")
+                color: root.stale ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.negativeTextColor
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
 
+            // Mouse first here and in the panel, matching the widget's name.
             RowLayout {
                 Layout.fillWidth: true
                 Layout.topMargin: Kirigami.Units.smallSpacing
@@ -124,11 +92,13 @@ PlasmoidItem {
 
                 Repeater {
                     model: [
-                        {"icon": "input-keyboard", "value": root.metric("keystrokes"), "label": i18n("keystrokes")},
-                        {"icon": "input-mouse", "value": root.totalClicks(), "label": i18n("clicks")}
+                        {"icon": "input-mouse", "value": root.totalClicks(), "label": i18n("clicks")},
+                        {"icon": "input-keyboard", "value": root.keys, "label": i18n("keystrokes")}
                     ]
 
                     RowLayout {
+                        required property var modelData
+
                         Layout.fillWidth: true
                         spacing: Kirigami.Units.smallSpacing
 
@@ -172,7 +142,13 @@ PlasmoidItem {
                 ]
 
                 MetricBar {
-                    visible: root.metric(modelData.key) > 0 || modelData.key === "click_left" || modelData.key === "click_right"
+                    required property var modelData
+
+                    // Side and extra buttons only appear once used, so the
+                    // popup does not list rows that are structurally always 0.
+                    visible: root.metric(modelData.key) > 0
+                        || modelData.key === "click_left"
+                        || modelData.key === "click_right"
                     label: modelData.label
                     value: root.metric(modelData.key)
                     maximum: root.maxClick()
@@ -216,10 +192,10 @@ PlasmoidItem {
                     Layout.fillWidth: true
                 }
                 PlasmaComponents3.Label {
+                    // Depends on the DPI setting, so the tooltip names it rather
+                    // than presenting the distance as measured fact.
                     text: root.travelText()
-                    // The conversion assumes a DPI, so the tooltip names it
-                    // rather than presenting the distance as measured fact.
-                    PlasmaComponents3.ToolTip.text: i18n("Estimated using %1 DPI (configurable)", Plasmoid.configuration.mouseDpi || 800)
+                    PlasmaComponents3.ToolTip.text: i18n("Estimated using %1 DPI (configurable)", Plasmoid.configuration.mouseDpi)
                     PlasmaComponents3.ToolTip.visible: travelHover.hovered
                     PlasmaComponents3.ToolTip.delay: 300
 
@@ -237,16 +213,16 @@ PlasmoidItem {
             }
 
             ActivityGraph {
-                values: (root.snapshot.activity || {}).values || []
-                labels: (root.snapshot.activity || {}).labels || []
+                values: (root.activity || {}).values || []
+                labels: (root.activity || {}).labels || []
                 Layout.fillWidth: true
                 Layout.preferredHeight: Kirigami.Units.gridUnit * 3
             }
 
             PlasmaComponents3.Label {
-                visible: Boolean(root.snapshot.peak)
-                text: root.snapshot.peak
-                    ? i18n("Peak %1:00 · %2 actions", root.snapshot.peak.hour, root.formatFull(root.snapshot.peak.value))
+                visible: Boolean(root.peak)
+                text: root.peak
+                    ? i18n("Peak %1:00 · %2 actions", root.peak.hour, root.formatFull(root.peak.value))
                     : ""
                 opacity: 0.7
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
@@ -273,14 +249,21 @@ PlasmoidItem {
 
             const stdout = data.stdout || "";
             if (stdout.length === 0) {
-                root.lastError = i18n("Stats helper returned no data.");
+                // cat failed, so the file is missing: the daemon has not
+                // written state yet, or is not running.
+                root.updated = 0;
+                root.lastError = "";
                 return;
             }
             try {
-                root.snapshot = JSON.parse(stdout);
+                const parsed = JSON.parse(stdout);
+                root.totals = parsed.totals || {};
+                root.activity = parsed.activity || {};
+                root.peak = parsed.peak || null;
+                root.updated = parsed.updated || 0;
                 root.lastError = "";
             } catch (error) {
-                root.lastError = i18n("Could not parse stats helper output.");
+                root.lastError = i18n("Could not parse daemon state file.");
             }
         }
     }
@@ -289,42 +272,23 @@ PlasmoidItem {
         interval: root.refreshMs
         running: true
         repeat: true
+        triggeredOnStart: true
         onTriggered: root.refreshData()
-    }
-
-    Component.onCompleted: refreshData()
-
-    function fileUrlToPath(url) {
-        var text = url.toString();
-        if (text.indexOf("file://") === 0) {
-            return decodeURIComponent(text.substring(7));
-        }
-        return text;
-    }
-
-    function shellQuote(text) {
-        return "'" + text.replace(/'/g, "'\\''") + "'";
     }
 
     function refreshData() {
         if (loading) {
             return;
         }
-        activeSource = "python3 " + shellQuote(helperPath) + " --stamp " + Date.now();
+        // Same XDG resolution the daemon uses, so the two cannot disagree
+        // about where state lives.
+        activeSource = 'cat "${XDG_DATA_HOME:-$HOME/.local/share}/kdeclick/state.json"';
         loading = true;
         executable.connectSource(activeSource);
     }
 
-    function totalsFor(windowKey) {
-        if (!snapshot || typeof snapshot !== "object") {
-            return {};
-        }
-        return snapshot[windowKey] || {};
-    }
-
     function metric(key) {
-        var totals = totalsFor(activeWindow);
-        return totals[key] || 0;
+        return (totals && totals[key]) || 0;
     }
 
     function totalClicks() {
@@ -338,22 +302,11 @@ PlasmoidItem {
     }
 
     function travelText() {
-        var dpi = Plasmoid.configuration.mouseDpi || 800;
-        var metres = metric("motion_units") / dpi * 0.0254;
+        var metres = metric("motion_units") / Plasmoid.configuration.mouseDpi * 0.0254;
         if (metres >= 1000) {
             return i18n("%1 km", (metres / 1000).toFixed(1));
         }
         return i18n("%1 m", metres.toFixed(metres < 10 ? 1 : 0));
-    }
-
-    function formatShort(value) {
-        if (value >= 1e6) {
-            return (value / 1e6).toFixed(value >= 1e7 ? 0 : 1) + "M";
-        }
-        if (value >= 1000) {
-            return (value / 1000).toFixed(value >= 10000 ? 0 : 1) + "k";
-        }
-        return Math.round(value).toString();
     }
 
     function formatFull(value) {
