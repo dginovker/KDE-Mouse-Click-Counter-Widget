@@ -21,14 +21,10 @@ Item {
     implicitWidth: layout.implicitWidth
     implicitHeight: Kirigami.Units.iconSizes.small * 2
 
-    function formatShort(value) {
-        if (value >= 1e6) {
-            return (value / 1e6).toFixed(value >= 1e7 ? 0 : 1) + "M";
-        }
-        if (value >= 1000) {
-            return (value / 1000).toFixed(value >= 10000 ? 0 : 1) + "k";
-        }
-        return Math.round(value).toString();
+    function format(value) {
+        // Full number with separators, matching the popup. Explicit 'f',0
+        // because Qt's toLocaleString defaults to two decimal places.
+        return Math.round(value).toLocaleString(Qt.locale(), 'f', 0);
     }
 
     ColumnLayout {
@@ -59,7 +55,7 @@ Item {
                 }
 
                 PlasmaComponents3.Label {
-                    text: counters.available ? counters.formatShort(modelData.value) : "—"
+                    text: counters.available ? counters.format(modelData.value) : "—"
                     font.pixelSize: counters.fontSize
                     font.features: ({ "tnum": 1 })
                     color: counters.stale ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor

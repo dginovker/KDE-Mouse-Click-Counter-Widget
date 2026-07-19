@@ -5,6 +5,7 @@ import org.kde.kirigami as Kirigami
 
 Kirigami.FormLayout {
     property alias cfg_mouseDpi: mouseDpi.value
+    property alias cfg_touchpadPerNotch: touchpadPerNotch.value
 
     QQC2.SpinBox {
         id: mouseDpi
@@ -12,6 +13,13 @@ Kirigami.FormLayout {
         from: 100
         to: 32000
         stepSize: 100
+    }
+
+    QQC2.SpinBox {
+        id: touchpadPerNotch
+        Kirigami.FormData.label: i18n("Touchpad events per notch:")
+        from: 1
+        to: 500
     }
 
     QQC2.Label {

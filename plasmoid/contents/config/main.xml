@@ -9,5 +9,9 @@
             <label>Mouse DPI used to convert pointer travel into distance</label>
             <default>800</default>
         </entry>
+        <entry name="touchpadPerNotch" type="Int">
+            <label>Touchpad scroll events equivalent to one mouse wheel notch</label>
+            <default>43</default>
+        </entry>
     </group>
 </kcfg>

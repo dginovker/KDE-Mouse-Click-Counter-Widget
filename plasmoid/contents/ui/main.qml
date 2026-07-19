@@ -28,7 +28,8 @@ PlasmoidItem {
     // gap this long means it died rather than that you sat still.
     readonly property bool stale: available && (Date.now() / 1000 - updated) > 90
 
-    readonly property real clicks: metric("click_left")
+    // Same total the popup headline shows, so panel and popup never disagree.
+    readonly property real clicks: totalClicks()
     readonly property real keys: metric("keystrokes")
 
     Plasmoid.title: i18n("Click Analytics")
@@ -169,21 +170,26 @@ PlasmoidItem {
                 rowSpacing: 2
 
                 PlasmaComponents3.Label {
-                    text: i18n("Wheel scroll")
+                    text: i18n("Scroll")
                     opacity: 0.75
                     Layout.fillWidth: true
                 }
                 PlasmaComponents3.Label {
-                    text: i18n("%1 notches", root.formatFull(root.metric("scroll_wheel")))
-                }
+                    // Wheel and touchpad are stored separately because they are
+                    // not the same unit; the equivalence is applied here so the
+                    // ratio can be retuned without rewriting history.
+                    text: i18n("%1 notches", root.formatFull(root.totalScrollNotches()))
+                    PlasmaComponents3.ToolTip.text: i18n(
+                        "%1 wheel notches + %2 touchpad events at %3 per notch",
+                        root.formatFull(root.metric("scroll_wheel")),
+                        root.formatFull(root.metric("scroll_touchpad")),
+                        Plasmoid.configuration.touchpadPerNotch)
+                    PlasmaComponents3.ToolTip.visible: scrollHover.hovered
+                    PlasmaComponents3.ToolTip.delay: 300
 
-                PlasmaComponents3.Label {
-                    text: i18n("Touchpad scroll")
-                    opacity: 0.75
-                    Layout.fillWidth: true
-                }
-                PlasmaComponents3.Label {
-                    text: root.formatFull(root.metric("scroll_touchpad"))
+                    HoverHandler {
+                        id: scrollHover
+                    }
                 }
 
                 PlasmaComponents3.Label {
@@ -296,6 +302,11 @@ PlasmoidItem {
             + metric("click_side") + metric("click_extra");
     }
 
+    function totalScrollNotches() {
+        var perNotch = Plasmoid.configuration.touchpadPerNotch;
+        return metric("scroll_wheel") + metric("scroll_touchpad") / perNotch;
+    }
+
     function maxClick() {
         return Math.max(1, metric("click_left"), metric("click_right"),
             metric("click_middle"), metric("click_side"), metric("click_extra"));
@@ -303,10 +314,12 @@ PlasmoidItem {
 
     function travelText() {
         var metres = metric("motion_units") / Plasmoid.configuration.mouseDpi * 0.0254;
+        // Two decimals is centimetre resolution. Note this is precision, not
+        // accuracy: the DPI assumption dominates the error by far.
         if (metres >= 1000) {
-            return i18n("%1 km", (metres / 1000).toFixed(1));
+            return i18n("%1 km", (metres / 1000).toFixed(3));
         }
-        return i18n("%1 m", metres.toFixed(metres < 10 ? 1 : 0));
+        return i18n("%1 m", metres.toFixed(2));
     }
 
     function formatFull(value) {
