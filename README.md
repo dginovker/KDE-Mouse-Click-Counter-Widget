@@ -1,7 +1,9 @@
-# Click Analytics
+# KDE Mouse Click Counter Widget
 
-A KDE Plasma 6 widget that counts how much you actually use your mouse and
-keyboard. Two stacked numbers in the panel, a breakdown when you click it.
+*Because I couldn't come up with a better name.*
+
+Taskbar widget to make number go brrr so dopamine go brr:
+<img width="953" height="812" alt="image" src="https://github.com/user-attachments/assets/b3d8f483-26bc-4713-8f03-2a1af6990bb3" />
 
 ## How it counts
 
