@@ -4,29 +4,45 @@ import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents3
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.extras as PlasmaExtras
-import org.kde.plasma.plasma5support as P5Support
 import org.kde.plasma.plasmoid
+import org.kde.plasma.workspace.dbus as DBus
 
 PlasmoidItem {
     id: root
 
-    // The daemon precomputes state.json, so a refresh is a 2ms `cat` rather
-    // than a 33ms Python run, and the totals are live rather than lagging the
-    // database flush.
-    readonly property int refreshMs: 1000
+    readonly property string dbusService: "io.github.dginovker.KDEClickAnalytics"
+    readonly property string dbusPath: "/io/github/dginovker/KDEClickAnalytics"
+    readonly property string dbusInterface: "io.github.dginovker.KDEClickAnalytics1"
 
-    property var totals: ({})
-    property var activity: ({})
-    property var peak: null
-    property real updated: 0
-    property string activeSource: ""
-    property bool loading: false
-    property string lastError: ""
+    property var snapshot: null
+    readonly property var totals: snapshot ? snapshot.totals : ({})
+    readonly property var activity: snapshot ? snapshot.activity : ({})
+    readonly property var peak: snapshot ? snapshot.peak : null
+    readonly property var network: snapshot ? snapshot.network
+        : ({"status": "initializing", "interface": "", "sampled_at": 0, "error": ""})
+    readonly property real updated: snapshot ? snapshot.updated : 0
+    property real nowSeconds: Date.now() / 1000
+    property bool componentReady: false
+    property int serviceEpoch: 0
+    property string acceptedInstance: ""
+    property double acceptedRevision: -1
+    property string lastError: i18n("The daemon's D-Bus service is not registered. Check: systemctl --user status kdeclickd")
 
-    readonly property bool available: updated > 0 && lastError.length === 0
-    // The daemon heartbeats every 30s whether or not anything was typed, so a
-    // gap this long means it died rather than that you sat still.
-    readonly property bool stale: available && (Date.now() / 1000 - updated) > 90
+    // Network sampling publishes once per second; a long margin avoids a false
+    // alarm while the machine is resuming from sleep.
+    readonly property bool hasSnapshot: snapshot !== null
+    readonly property bool stale: hasSnapshot && nowSeconds - updated > 90
+    readonly property bool available: hasSnapshot && serviceWatcher.registered
+        && lastError.length === 0 && !stale
+    readonly property string daemonStatus: lastError || (stale
+        ? i18n("The last daemon update is stale; its service may be stuck.")
+        : i18n("No valid daemon state has been received."))
+    readonly property string networkStatus: network.status === "ok"
+        ? i18n("Interface %1 · sampled %2 s ago", network.interface,
+            Math.max(0, Math.floor(nowSeconds - network.sampled_at)))
+        : network.status === "initializing"
+            ? i18n("Network measurement is initializing.")
+            : i18n("Network measurement %1: %2", network.status, network.error)
 
     // Same total the popup headline shows, so panel and popup never disagree.
     readonly property real clicks: totalClicks()
@@ -38,9 +54,10 @@ PlasmoidItem {
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
 
     toolTipMainText: i18n("Click Analytics")
-    toolTipSubText: available
+    toolTipSubText: hasSnapshot
         ? i18n("%1 clicks · %2 keystrokes", formatFull(clicks), formatFull(keys))
-        : i18n("Daemon not running")
+            + (available ? "" : "\n" + daemonStatus)
+        : daemonStatus
 
     compactRepresentation: MouseArea {
         Layout.minimumWidth: counters.implicitWidth + Kirigami.Units.smallSpacing * 2
@@ -54,8 +71,10 @@ PlasmoidItem {
             anchors.fill: parent
             clicks: root.clicks
             keys: root.keys
-            available: root.available
-            stale: root.stale
+            // Preserve the last trustworthy totals during a daemon fault; the
+            // red state and tooltip make their age explicit.
+            available: root.hasSnapshot
+            stale: !root.available
         }
     }
 
@@ -76,11 +95,9 @@ PlasmoidItem {
             }
 
             PlasmaComponents3.Label {
-                visible: !root.available || root.stale
-                text: root.stale
-                    ? i18n("Counts look stale — the daemon may have stopped.")
-                    : i18n("Daemon not running. Check: systemctl --user status kdeclickd")
-                color: root.stale ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.negativeTextColor
+                visible: !root.available
+                text: root.daemonStatus
+                color: Kirigami.Theme.negativeTextColor
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
@@ -209,6 +226,18 @@ PlasmoidItem {
                         id: travelHover
                     }
                 }
+
+                PlasmaComponents3.Label {
+                    text: i18n("Downloaded %1 · Uploaded %2",
+                        root.formatBytes(root.metric("network_rx_bytes")),
+                        root.formatBytes(root.metric("network_tx_bytes"))) + "\n" + root.networkStatus
+                    color: root.network.status === "initializing"
+                        || root.network.status === "ok"
+                        ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.negativeTextColor
+                    wrapMode: Text.WordWrap
+                    Layout.columnSpan: 2
+                    Layout.fillWidth: true
+                }
             }
 
             PlasmaComponents3.Label {
@@ -219,8 +248,8 @@ PlasmoidItem {
             }
 
             ActivityGraph {
-                values: (root.activity || {}).values || []
-                labels: (root.activity || {}).labels || []
+                values: root.hasSnapshot ? root.activity.values : []
+                labels: root.hasSnapshot ? root.activity.labels : []
                 Layout.fillWidth: true
                 Layout.preferredHeight: Kirigami.Units.gridUnit * 3
             }
@@ -241,60 +270,148 @@ PlasmoidItem {
         }
     }
 
-    P5Support.DataSource {
-        id: executable
-        engine: "executable"
+    DBus.SignalWatcher {
+        busType: DBus.BusType.Session
+        service: root.dbusService
+        path: root.dbusPath
+        iface: root.dbusInterface
 
-        onNewData: function (sourceName, data) {
-            if (sourceName !== root.activeSource) {
-                return;
-            }
-            disconnectSource(sourceName);
-            root.activeSource = "";
-            root.loading = false;
-
-            const stdout = data.stdout || "";
-            if (stdout.length === 0) {
-                // cat failed, so the file is missing: the daemon has not
-                // written state yet, or is not running.
-                root.updated = 0;
-                root.lastError = "";
-                return;
-            }
-            try {
-                const parsed = JSON.parse(stdout);
-                root.totals = parsed.totals || {};
-                root.activity = parsed.activity || {};
-                root.peak = parsed.peak || null;
-                root.updated = parsed.updated || 0;
-                root.lastError = "";
-            } catch (error) {
-                root.lastError = i18n("Could not parse daemon state file.");
-            }
+        function dbusStateChanged(stateJson) {
+            root.acceptState(stateJson, root.serviceEpoch, false);
         }
     }
 
+    DBus.DBusServiceWatcher {
+        id: serviceWatcher
+        busType: DBus.BusType.Session
+        watchedService: root.dbusService
+
+        onRegisteredChanged: if (root.componentReady) root.handleServiceRegistration(registered)
+    }
+
+    // This timer only advances age labels; all state delivery is event-driven.
     Timer {
-        interval: root.refreshMs
+        interval: 5000
         running: true
         repeat: true
         triggeredOnStart: true
-        onTriggered: root.refreshData()
+        onTriggered: root.nowSeconds = Date.now() / 1000
     }
 
-    function refreshData() {
-        if (loading) {
+    Component.onCompleted: {
+        // Both watchers are complete now, so no update can land between the
+        // initial method call and signal subscription.
+        componentReady = true;
+        if (serviceWatcher.registered) {
+            handleServiceRegistration(true);
+        }
+    }
+
+    function handleServiceRegistration(registered) {
+        serviceEpoch += 1;
+        acceptedInstance = "";
+        acceptedRevision = -1;
+
+        if (!registered) {
+            reportStateError(i18n("The daemon's D-Bus service stopped. Check: systemctl --user status kdeclickd"));
             return;
         }
-        // Same XDG resolution the daemon uses, so the two cannot disagree
-        // about where state lives.
-        activeSource = 'cat "${XDG_DATA_HOME:-$HOME/.local/share}/kdeclick/state.json"';
-        loading = true;
-        executable.connectSource(activeSource);
+
+        lastError = i18n("Waiting for the daemon's initial D-Bus state.");
+        requestState(serviceEpoch);
+    }
+
+    function requestState(epoch) {
+        DBus.SessionBus.asyncCall({
+            "service": dbusService,
+            "path": dbusPath,
+            "iface": dbusInterface,
+            "member": "GetState"
+        }, function (reply) {
+            if (epoch === root.serviceEpoch) {
+                root.acceptState(reply.value, epoch, true);
+            }
+        }, function (reply) {
+            if (epoch === root.serviceEpoch && serviceWatcher.registered) {
+                root.reportStateError(i18n("The daemon's GetState call failed: %1",
+                    reply.error.message));
+            }
+        });
+    }
+
+    function acceptState(stateJson, epoch, authoritative) {
+        if (epoch !== serviceEpoch || !serviceWatcher.registered) {
+            return;
+        }
+        let state;
+        try {
+            if (stateJson === null || stateJson === undefined) {
+                throw new TypeError("payload is empty");
+            }
+            state = JSON.parse(String(stateJson));
+            if (!validState(state)) {
+                throw new TypeError("payload does not match schema 1");
+            }
+        } catch (error) {
+            reportStateError(i18n("The daemon returned unreadable state: %1", String(error)));
+            return;
+        }
+
+        // GetState identifies the current bus owner authoritatively. This
+        // prevents a queued signal from the previous owner winning a restart.
+        if (authoritative && acceptedInstance !== state.instance) {
+            acceptedRevision = -1;
+        }
+        if (authoritative || acceptedInstance.length === 0) {
+            acceptedInstance = state.instance;
+        }
+        if (acceptedInstance !== state.instance) {
+            return;
+        }
+
+        // A StateChanged signal can overtake the initial GetState response.
+        if (state.revision <= acceptedRevision) {
+            return;
+        }
+
+        acceptedRevision = state.revision;
+        snapshot = state;
+        lastError = "";
+    }
+
+    function validState(state) {
+        const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+        const nonnegative = value => typeof value === "number" && isFinite(value) && value >= 0;
+        if (!object(state) || state.schema !== 1 || typeof state.instance !== "string"
+                || state.instance.length === 0 || !nonnegative(state.revision)
+                || Math.floor(state.revision) !== state.revision
+                || !nonnegative(state.updated) || state.updated === 0) {
+            return false;
+        }
+        const activity = state.activity;
+        const peak = state.peak;
+        const net = state.network;
+        const metrics = ["keystrokes", "click_left", "click_right", "click_middle",
+            "click_side", "click_extra", "scroll_wheel", "scroll_touchpad",
+            "motion_units", "network_rx_bytes", "network_tx_bytes"];
+        return object(state.totals) && metrics.every(key => nonnegative(state.totals[key]))
+            && Object.keys(state.totals).every(key => nonnegative(state.totals[key]))
+            && object(activity) && Array.isArray(activity.values) && Array.isArray(activity.labels)
+                && activity.values.length === 24 && activity.labels.length === 24
+                && activity.values.every(nonnegative) && activity.labels.every(label => typeof label === "string")
+            && (peak === null || (object(peak) && typeof peak.hour === "string" && nonnegative(peak.value)))
+            && object(net) && ["initializing", "ok", "unavailable", "error"].indexOf(net.status) >= 0
+                && typeof net.interface === "string" && typeof net.error === "string" && nonnegative(net.sampled_at)
+                && (net.status !== "ok" || (net.interface.length > 0 && net.sampled_at > 0));
+    }
+
+    function reportStateError(message) {
+        lastError = message;
+        console.warn("Click Analytics: " + message);
     }
 
     function metric(key) {
-        return (totals && totals[key]) || 0;
+        return hasSnapshot ? totals[key] : 0;
     }
 
     function totalClicks() {
@@ -326,5 +443,17 @@ PlasmoidItem {
         // Explicit 'f',0: Qt's toLocaleString defaults to 2 decimals, which
         // renders every whole-number count as "289,713.00".
         return Math.round(value).toLocaleString(Qt.locale(), 'f', 0);
+    }
+
+    function formatBytes(value) {
+        const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+        let scaled = value;
+        let unit = 0;
+        while (scaled >= 1024 && unit < units.length - 1) {
+            scaled /= 1024;
+            ++unit;
+        }
+        const decimals = unit === 0 || scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+        return scaled.toLocaleString(Qt.locale(), 'f', decimals) + " " + units[unit];
     }
 }

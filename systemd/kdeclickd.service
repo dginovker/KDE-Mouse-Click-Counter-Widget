@@ -1,24 +1,28 @@
 [Unit]
-Description=Input analytics daemon for the Click Analytics widget
+Description=Input and network analytics daemon for the Click Analytics widget
 Documentation=https://github.com/dginovker/KDEClickAnalytics
 
 [Service]
-Type=simple
-ExecStart=%h/.local/lib/kdeclick/kdeclickd.py
+Type=dbus
+BusName=io.github.dginovker.KDEClickAnalytics
+ExecStart=%h/.local/lib/kdeclick/kdeclickd.py --data-dir %h/.local/share/kdeclick
 Restart=on-failure
 RestartSec=5
+# Pending counts exist only in memory until the final SQLite commit succeeds.
+TimeoutStopSec=infinity
 
 # Counting is timer-sensitive: libinput drives tap detection from its own
 # timers, and late dispatch silently loses taps.
 Nice=-5
 
-# The daemon only ever reads input devices and writes one SQLite file.
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=%h/.local/share/kdeclick
 ProtectKernelTunables=true
 ProtectControlGroups=true
+# The session bus is local, so access to an IP socket family would only widen
+# the sandbox without helping publish state or read kernel network counters.
 RestrictAddressFamilies=AF_UNIX
 NoNewPrivileges=true
 

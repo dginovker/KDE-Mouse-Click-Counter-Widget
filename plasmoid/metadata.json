@@ -8,15 +8,15 @@
             }
         ],
         "Category": "System Information",
-        "Description": "Tracks clicks, keystrokes, scrolling and pointer travel",
+        "Description": "Tracks input activity and network transfer totals",
         "EnabledByDefault": false,
         "Icon": "input-mouse",
         "Id": "local.clickanalytics",
         "License": "GPL-3.0-only",
         "Name": "Click Analytics",
-        "Version": "0.1.0"
+        "Version": "0.2.0"
     },
     "X-Plasma-API": "declarativeappletscript",
-    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-API-Minimum-Version": "6.4",
     "X-Plasma-MainScript": "ui/main.qml"
 }
