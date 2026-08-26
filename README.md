@@ -54,6 +54,10 @@ Input changes are coalesced to at most four updates per second. Complete
 snapshots make missed signals self-healing instead of making the widget depend
 on a sequence of deltas.
 
+The popup graphs both input actions and downloaded/uploaded bytes across the
+last 24 hourly buckets. Download and upload share one scale so their relative
+sizes are not exaggerated.
+
 ## Network-byte semantics
 
 Once per second the daemon reads Linux's `/proc/net/dev` counters for the one

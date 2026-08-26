@@ -41,19 +41,19 @@ NETWORK_SAMPLE_SECONDS = 1.0
 DBUS_SERVICE = "io.github.dginovker.KDEClickAnalytics"
 DBUS_PATH = "/io/github/dginovker/KDEClickAnalytics"
 DBUS_INTERFACE = "io.github.dginovker.KDEClickAnalytics1"
-STATE_SCHEMA = 1
+STATE_SCHEMA = 3
 
 # Counted as "actions" in the activity graph.
 ACTION_METRICS = ("keystrokes", "click_left", "click_right", "click_middle")
+NETWORK_METRICS = ("network_rx_bytes", "network_tx_bytes")
+GRAPH_METRICS = ACTION_METRICS + NETWORK_METRICS
 DISPLAY_METRICS = ACTION_METRICS + (
     "click_side",
     "click_extra",
     "scroll_wheel",
     "scroll_touchpad",
     "motion_units",
-    "network_rx_bytes",
-    "network_tx_bytes",
-)
+) + NETWORK_METRICS
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS counts (
@@ -101,8 +101,8 @@ class Counters:
             self._pending[(bucket, metric)] += amount
             self._totals[metric] += amount
             self._session[metric] += amount
-            if metric in ACTION_METRICS:
-                self._hourly[bucket] += amount
+            if metric in GRAPH_METRICS:
+                self._hourly[(bucket, metric)] += amount
             self.dirty = True
 
     def drain_pending(self):
@@ -167,7 +167,7 @@ class Storage:
 
     @staticmethod
     def load(path):
-        """Read all-time totals and the last 24h of activity into memory."""
+        """Read all-time totals and recent graph rows into memory."""
         if not Path(path).exists():
             return {}, {}
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -175,11 +175,11 @@ class Storage:
             totals = {m: v for m, v in connection.execute(
                 "SELECT metric, SUM(value) FROM counts GROUP BY metric")}
             cutoff = bucket_for(time.time() - 24 * 3600)
-            placeholders = ",".join("?" * len(ACTION_METRICS))
-            hourly = {b: v for b, v in connection.execute(
-                f"SELECT bucket, SUM(value) FROM counts WHERE bucket >= ? "
-                f"AND metric IN ({placeholders}) GROUP BY bucket",
-                (cutoff, *ACTION_METRICS))}
+            placeholders = ",".join("?" * len(GRAPH_METRICS))
+            hourly = {(b, m): v for b, m, v in connection.execute(
+                f"SELECT bucket, metric, value FROM counts WHERE bucket >= ? "
+                f"AND metric IN ({placeholders})",
+                (cutoff, *GRAPH_METRICS))}
         connection.close()
         return totals, hourly
 
@@ -477,7 +477,10 @@ class Daemon:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         totals, hourly = Storage.load(self.db_path)
-        log(f"loaded {len(totals)} metrics, {len(hourly)} recent hours from {self.db_path}")
+        log(
+            f"loaded {len(totals)} metrics, {len(hourly)} recent graph rows "
+            f"from {self.db_path}"
+        )
 
         self.counters = Counters(totals, hourly)
         self.network = NetworkSampler(self.counters)
@@ -540,13 +543,22 @@ class Daemon:
             totals.setdefault(metric, 0.0)
         now = time.time()
 
-        values, labels = [], []
+        values, rx_bytes, tx_bytes, labels = [], [], [], []
         for offset in range(23, -1, -1):
             moment = now - offset * 3600
-            values.append(hourly.get(bucket_for(moment), 0.0))
+            bucket = bucket_for(moment)
+            values.append(sum(hourly.get((bucket, metric), 0.0)
+                              for metric in ACTION_METRICS))
+            rx_bytes.append(hourly.get((bucket, "network_rx_bytes"), 0.0))
+            tx_bytes.append(hourly.get((bucket, "network_tx_bytes"), 0.0))
             labels.append(time.strftime("%H", time.localtime(moment)))
 
-        peak = max(range(24), key=lambda i: values[i]) if any(values) else None
+        network = self.network.snapshot()
+        network["history"] = {
+            "labels": labels,
+            "rx_bytes": rx_bytes,
+            "tx_bytes": tx_bytes,
+        }
         self._revision += 1
         payload = {
             "schema": STATE_SCHEMA,
@@ -555,8 +567,7 @@ class Daemon:
             "updated": now,
             "totals": totals,
             "activity": {"values": values, "labels": labels},
-            "peak": {"hour": labels[peak], "value": values[peak]} if peak is not None else None,
-            "network": self.network.snapshot(),
+            "network": network,
         }
         return json.dumps(payload, separators=(",", ":"), allow_nan=False)
 

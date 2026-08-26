@@ -17,9 +17,10 @@ PlasmoidItem {
     property var snapshot: null
     readonly property var totals: snapshot ? snapshot.totals : ({})
     readonly property var activity: snapshot ? snapshot.activity : ({})
-    readonly property var peak: snapshot ? snapshot.peak : null
     readonly property var network: snapshot ? snapshot.network
         : ({"status": "initializing", "interface": "", "sampled_at": 0, "error": ""})
+    readonly property var networkHistory: snapshot ? snapshot.network.history
+        : ({"labels": [], "rx_bytes": [], "tx_bytes": []})
     readonly property real updated: snapshot ? snapshot.updated : 0
     property real nowSeconds: Date.now() / 1000
     property bool componentReady: false
@@ -37,12 +38,6 @@ PlasmoidItem {
     readonly property string daemonStatus: lastError || (stale
         ? i18n("The last daemon update is stale; its service may be stuck.")
         : i18n("No valid daemon state has been received."))
-    readonly property string networkStatus: network.status === "ok"
-        ? i18n("Interface %1 · sampled %2 s ago", network.interface,
-            Math.max(0, Math.floor(nowSeconds - network.sampled_at)))
-        : network.status === "initializing"
-            ? i18n("Network measurement is initializing.")
-            : i18n("Network measurement %1: %2", network.status, network.error)
 
     // Same total the popup headline shows, so panel and popup never disagree.
     readonly property real clicks: totalClicks()
@@ -89,7 +84,7 @@ PlasmoidItem {
             spacing: Kirigami.Units.smallSpacing
 
             PlasmaComponents3.Label {
-                text: i18n("Input Analytics")
+                text: i18n("Totals")
                 font.bold: true
                 Layout.fillWidth: true
             }
@@ -103,15 +98,23 @@ PlasmoidItem {
             }
 
             // Mouse first here and in the panel, matching the widget's name.
-            RowLayout {
+            GridLayout {
                 Layout.fillWidth: true
                 Layout.topMargin: Kirigami.Units.smallSpacing
-                spacing: Kirigami.Units.largeSpacing
+                columns: 4
+                columnSpacing: Kirigami.Units.smallSpacing
+                rowSpacing: Kirigami.Units.smallSpacing
 
                 Repeater {
                     model: [
-                        {"icon": "input-mouse", "value": root.totalClicks(), "label": i18n("clicks")},
-                        {"icon": "input-keyboard", "value": root.keys, "label": i18n("keystrokes")}
+                        {"icon": "input-mouse", "valueText": root.formatFull(root.totalClicks()),
+                            "label": i18n("clicks")},
+                        {"icon": "input-keyboard", "valueText": root.formatFull(root.keys),
+                            "label": i18n("keystrokes")},
+                        {"icon": "go-down", "valueText": root.formatBytes(root.metric("network_rx_bytes")),
+                            "label": i18n("download")},
+                        {"icon": "go-up", "valueText": root.formatBytes(root.metric("network_tx_bytes")),
+                            "label": i18n("upload")}
                     ]
 
                     RowLayout {
@@ -122,15 +125,15 @@ PlasmoidItem {
 
                         Kirigami.Icon {
                             source: modelData.icon
-                            Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
-                            Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                            Layout.preferredHeight: Kirigami.Units.iconSizes.small
                         }
 
                         ColumnLayout {
                             spacing: 0
 
                             PlasmaComponents3.Label {
-                                text: root.formatFull(modelData.value)
+                                text: modelData.valueText
                                 font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.3
                                 font.bold: true
                             }
@@ -155,15 +158,14 @@ PlasmoidItem {
                     {"key": "click_left", "label": i18n("Left")},
                     {"key": "click_right", "label": i18n("Right")},
                     {"key": "click_middle", "label": i18n("Middle")},
-                    {"key": "click_side", "label": i18n("Side")},
                     {"key": "click_extra", "label": i18n("Extra")}
                 ]
 
                 MetricBar {
                     required property var modelData
 
-                    // Side and extra buttons only appear once used, so the
-                    // popup does not list rows that are structurally always 0.
+                    // Extra buttons only appear once used, so the popup does
+                    // not list a row that is structurally always 0.
                     visible: root.metric(modelData.key) > 0
                         || modelData.key === "click_left"
                         || modelData.key === "click_right"
@@ -226,22 +228,10 @@ PlasmoidItem {
                         id: travelHover
                     }
                 }
-
-                PlasmaComponents3.Label {
-                    text: i18n("Downloaded %1 · Uploaded %2",
-                        root.formatBytes(root.metric("network_rx_bytes")),
-                        root.formatBytes(root.metric("network_tx_bytes"))) + "\n" + root.networkStatus
-                    color: root.network.status === "initializing"
-                        || root.network.status === "ok"
-                        ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.negativeTextColor
-                    wrapMode: Text.WordWrap
-                    Layout.columnSpan: 2
-                    Layout.fillWidth: true
-                }
             }
 
             PlasmaComponents3.Label {
-                text: i18n("Activity (24h)")
+                text: i18n("Input activity (24h)")
                 font.bold: true
                 Layout.fillWidth: true
                 Layout.topMargin: Kirigami.Units.smallSpacing
@@ -254,14 +244,54 @@ PlasmoidItem {
                 Layout.preferredHeight: Kirigami.Units.gridUnit * 3
             }
 
-            PlasmaComponents3.Label {
-                visible: Boolean(root.peak)
-                text: root.peak
-                    ? i18n("Peak %1:00 · %2 actions", root.peak.hour, root.formatFull(root.peak.value))
-                    : ""
-                opacity: 0.7
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+            RowLayout {
                 Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.smallSpacing
+
+                PlasmaComponents3.Label {
+                    text: i18n("Network activity (24h)")
+                    font.bold: true
+                    Layout.fillWidth: true
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.small / 2
+                    Layout.preferredHeight: Layout.preferredWidth
+                    radius: 1
+                    color: networkGraph.primaryColor
+                }
+
+                PlasmaComponents3.Label {
+                    text: i18n("Download")
+                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.small / 2
+                    Layout.preferredHeight: Layout.preferredWidth
+                    radius: 1
+                    color: networkGraph.secondaryColor
+                }
+
+                PlasmaComponents3.Label {
+                    text: i18n("Upload")
+                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                }
+            }
+
+            ActivityGraph {
+                id: networkGraph
+                values: root.hasSnapshot ? root.networkHistory.rx_bytes : []
+                secondaryValues: root.hasSnapshot ? root.networkHistory.tx_bytes : []
+                labels: root.hasSnapshot ? root.networkHistory.labels : []
+                tooltipText: function(index) {
+                    return i18n("%1:00 — Download %2 · Upload %3",
+                        root.networkHistory.labels[index],
+                        root.formatBytes(root.networkHistory.rx_bytes[index]),
+                        root.formatBytes(root.networkHistory.tx_bytes[index]));
+                }
+                Layout.fillWidth: true
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 3
             }
 
             Item {
@@ -350,7 +380,7 @@ PlasmoidItem {
             }
             state = JSON.parse(String(stateJson));
             if (!validState(state)) {
-                throw new TypeError("payload does not match schema 1");
+                throw new TypeError("payload does not match schema 3");
             }
         } catch (error) {
             reportStateError(i18n("The daemon returned unreadable state: %1", String(error)));
@@ -382,15 +412,15 @@ PlasmoidItem {
     function validState(state) {
         const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
         const nonnegative = value => typeof value === "number" && isFinite(value) && value >= 0;
-        if (!object(state) || state.schema !== 1 || typeof state.instance !== "string"
+        if (!object(state) || state.schema !== 3 || typeof state.instance !== "string"
                 || state.instance.length === 0 || !nonnegative(state.revision)
                 || Math.floor(state.revision) !== state.revision
                 || !nonnegative(state.updated) || state.updated === 0) {
             return false;
         }
         const activity = state.activity;
-        const peak = state.peak;
         const net = state.network;
+        const history = object(net) ? net.history : null;
         const metrics = ["keystrokes", "click_left", "click_right", "click_middle",
             "click_side", "click_extra", "scroll_wheel", "scroll_touchpad",
             "motion_units", "network_rx_bytes", "network_tx_bytes"];
@@ -399,10 +429,15 @@ PlasmoidItem {
             && object(activity) && Array.isArray(activity.values) && Array.isArray(activity.labels)
                 && activity.values.length === 24 && activity.labels.length === 24
                 && activity.values.every(nonnegative) && activity.labels.every(label => typeof label === "string")
-            && (peak === null || (object(peak) && typeof peak.hour === "string" && nonnegative(peak.value)))
             && object(net) && ["initializing", "ok", "unavailable", "error"].indexOf(net.status) >= 0
                 && typeof net.interface === "string" && typeof net.error === "string" && nonnegative(net.sampled_at)
-                && (net.status !== "ok" || (net.interface.length > 0 && net.sampled_at > 0));
+                && (net.status !== "ok" || (net.interface.length > 0 && net.sampled_at > 0))
+            && object(history) && Array.isArray(history.labels)
+                && Array.isArray(history.rx_bytes) && Array.isArray(history.tx_bytes)
+                && history.labels.length === 24 && history.rx_bytes.length === 24
+                && history.tx_bytes.length === 24
+                && history.labels.every(label => typeof label === "string")
+                && history.rx_bytes.every(nonnegative) && history.tx_bytes.every(nonnegative);
     }
 
     function reportStateError(message) {
@@ -426,7 +461,7 @@ PlasmoidItem {
 
     function maxClick() {
         return Math.max(1, metric("click_left"), metric("click_right"),
-            metric("click_middle"), metric("click_side"), metric("click_extra"));
+            metric("click_middle"), metric("click_extra"));
     }
 
     function travelText() {

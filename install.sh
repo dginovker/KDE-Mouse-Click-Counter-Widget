@@ -140,8 +140,17 @@ try:
     state = json.loads(str(dbus.Interface(proxy, interface).GetState(timeout=5)))
 except Exception as error:
     raise SystemExit(f"ERROR: D-Bus GetState failed: {error}")
-if state.get("schema") != 1 or not isinstance(state.get("totals"), dict):
-    raise SystemExit("ERROR: D-Bus GetState did not return schema 1 totals")
+if state.get("schema") != 3 or not isinstance(state.get("totals"), dict):
+    raise SystemExit("ERROR: D-Bus GetState did not return schema 3 totals")
+network = state.get("network")
+history = network.get("history") if isinstance(network, dict) else None
+if (not isinstance(history, dict)
+        or not all(isinstance(history.get(key), list) and len(history[key]) == 24
+                   for key in ("labels", "rx_bytes", "tx_bytes"))
+        or not all(isinstance(label, str) for label in history["labels"])
+        or not all(isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+                   for key in ("rx_bytes", "tx_bytes") for value in history[key])):
+    raise SystemExit("ERROR: D-Bus GetState did not return 24 valid network history buckets")
 persisted = {}
 if checkpoint:
     with sqlite3.connect(f"file:{checkpoint}?mode=ro", uri=True) as connection:
@@ -161,7 +170,9 @@ fi
 echo "Installing widget"
 if kpackagetool6 --type Plasma/Applet --show local.clickanalytics >/dev/null 2>&1; then
     if ! cmp -s plasmoid/metadata.json "$PLASMOID_DIR/metadata.json" \
-            || ! cmp -s plasmoid/contents/ui/main.qml "$PLASMOID_DIR/contents/ui/main.qml"; then
+            || ! cmp -s plasmoid/contents/ui/main.qml "$PLASMOID_DIR/contents/ui/main.qml" \
+            || ! cmp -s plasmoid/contents/ui/ActivityGraph.qml \
+                "$PLASMOID_DIR/contents/ui/ActivityGraph.qml"; then
         kpackagetool6 --type Plasma/Applet --upgrade plasmoid
     fi
 else
@@ -170,9 +181,12 @@ fi
 kpackagetool6 --type Plasma/Applet --show local.clickanalytics >/dev/null \
     || die "the widget package could not be verified"
 cmp -s plasmoid/metadata.json "$PLASMOID_DIR/metadata.json" \
-    || die "the installed widget metadata does not match version 0.2.0"
+    || die "the installed widget metadata does not match the source"
 cmp -s plasmoid/contents/ui/main.qml "$PLASMOID_DIR/contents/ui/main.qml" \
     || die "the installed widget is missing the D-Bus state implementation"
+cmp -s plasmoid/contents/ui/ActivityGraph.qml \
+        "$PLASMOID_DIR/contents/ui/ActivityGraph.qml" \
+    || die "the installed widget is missing the paired network graph implementation"
 
 # KPackage replaces the files but existing widget instances keep their loaded QML.
 if systemctl --user is-active --quiet plasma-plasmashell.service; then
@@ -186,6 +200,6 @@ fi
 # At this point SQLite and D-Bus have replaced both jobs the old file performed.
 rm -f -- "$STATE_PATH" "$STATE_TEMP_PATH"
 
-echo "Done. kdeclickd PID $NEW_PID is publishing schema 1 over D-Bus."
+echo "Done. kdeclickd PID $NEW_PID is publishing schema 3 over D-Bus."
 echo "Database: $DB_PATH"
 [[ -z "$BACKUP_PATH" ]] || echo "Backup:   $BACKUP_PATH"

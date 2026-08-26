@@ -6,14 +6,41 @@ Item {
     id: graph
 
     property var values: []
+    property var secondaryValues: []
     property var labels: []
+    property color primaryColor: Kirigami.Theme.highlightColor
+    property color secondaryColor: Kirigami.Theme.positiveTextColor
+    property var tooltipText: null
+
+    readonly property bool paired: secondaryValues.length === values.length
+        && values.length > 0
 
     readonly property real maximum: {
         var peak = 0;
         for (var i = 0; i < values.length; i++) {
             peak = Math.max(peak, values[i]);
+            if (paired) {
+                peak = Math.max(peak, secondaryValues[i]);
+            }
         }
         return peak;
+    }
+
+    function barHeight(value) {
+        return Math.max(1, maximum > 0 ? value / maximum * bars.height : 1);
+    }
+
+    function baselineColor() {
+        return Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+            Kirigami.Theme.textColor.b, 0.18);
+    }
+
+    function tooltipFor(index) {
+        if (labels.length <= index) {
+            return "";
+        }
+        return tooltipText ? tooltipText(index)
+            : i18n("%1:00 — %2 actions", labels[index], Math.round(values[index]));
     }
 
     Row {
@@ -26,25 +53,44 @@ Item {
             model: graph.values.length
 
             Item {
+                id: hour
+
                 width: (graph.width - (graph.values.length - 1)) / graph.values.length
                 height: bars.height
+                activeFocusOnTab: true
+                Accessible.role: Accessible.StaticText
+                Accessible.name: graph.tooltipFor(index)
 
                 Rectangle {
                     anchors.bottom: parent.bottom
-                    width: parent.width
+                    anchors.left: parent.left
+                    width: graph.paired ? (parent.width - 1) / 2 : parent.width
                     // A floor of 1px keeps empty hours visible as a baseline, so
                     // "no activity" reads as a measured zero rather than a gap
                     // where the graph failed to draw.
-                    height: Math.max(1, graph.maximum > 0
-                        ? (graph.values[index] / graph.maximum) * parent.height
-                        : 1)
+                    height: graph.barHeight(graph.values[index])
                     radius: width > 3 ? 1 : 0
                     color: graph.values[index] > 0
-                        ? Kirigami.Theme.highlightColor
-                        : Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.18)
-                    opacity: graph.maximum > 0 && graph.values[index] > 0
-                        ? 0.45 + 0.55 * (graph.values[index] / graph.maximum)
-                        : 1
+                        ? graph.primaryColor : graph.baselineColor()
+
+                    Behavior on height {
+                        NumberAnimation {
+                            duration: Kirigami.Units.longDuration
+                            easing.type: Easing.OutCubic
+                        }
+                    }
+                }
+
+                Rectangle {
+                    visible: graph.paired
+                    anchors.bottom: parent.bottom
+                    anchors.right: parent.right
+                    width: (parent.width - 1) / 2
+                    height: graph.paired
+                        ? graph.barHeight(graph.secondaryValues[index]) : 1
+                    radius: width > 3 ? 1 : 0
+                    color: graph.paired && graph.secondaryValues[index] > 0
+                        ? graph.secondaryColor : graph.baselineColor()
 
                     Behavior on height {
                         NumberAnimation {
@@ -58,10 +104,12 @@ Item {
                     id: hover
                 }
 
-                PlasmaComponents3.ToolTip.text: graph.labels.length > index
-                    ? i18n("%1:00 — %2 actions", graph.labels[index], Math.round(graph.values[index]))
-                    : ""
-                PlasmaComponents3.ToolTip.visible: hover.hovered
+                TapHandler {
+                    onTapped: hour.forceActiveFocus()
+                }
+
+                PlasmaComponents3.ToolTip.text: graph.tooltipFor(index)
+                PlasmaComponents3.ToolTip.visible: hover.hovered || hour.activeFocus
                 PlasmaComponents3.ToolTip.delay: 200
             }
         }
@@ -72,6 +120,7 @@ Item {
         anchors.bottom: parent.bottom
         width: parent.width
         height: Kirigami.Theme.smallFont.pixelSize + 2
+        spacing: 1
 
         Repeater {
             model: graph.labels.length
