@@ -2,6 +2,8 @@
 
 *Because I couldn't come up with a better name.*
 
+Windows 11: [install the taskbar counter and flyout](windows/README.md).
+
 A Plasma widget that tracks clicks, keystrokes, scrolling, pointer travel, and
 network upload/download totals. It records counts only: key identities and
 network contents are never collected.

@@ -1,0 +1,13 @@
+name: Windows port
+on: [push, pull_request]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Geometry and persistence regression checks
+        shell: powershell
+        run: ./windows/test.ps1
+      - name: Build app
+        shell: powershell
+        run: ./windows/build.ps1

@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+windows/*.exe
+windows/test-result.txt
+
+windows/*.exe.previous
+
+windows/.build/
