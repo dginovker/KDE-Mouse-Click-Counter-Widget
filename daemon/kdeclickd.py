@@ -170,7 +170,9 @@ class Storage:
         """Read all-time totals and recent graph rows into memory."""
         if not Path(path).exists():
             return {}, {}
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        # Read-write on purpose: after a hard reset SQLite must roll back the hot
+        # journal before the first read, and a read-only connection cannot.
+        connection = sqlite3.connect(str(path))
         with connection:
             totals = {m: v for m, v in connection.execute(
                 "SELECT metric, SUM(value) FROM counts GROUP BY metric")}
