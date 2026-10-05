@@ -21,6 +21,9 @@ PlasmoidItem {
         : ({"status": "initializing", "interface": "", "sampled_at": 0, "error": ""})
     readonly property var networkHistory: snapshot ? snapshot.network.history
         : ({"labels": [], "rx_bytes": [], "tx_bytes": []})
+    readonly property var agents: snapshot ? snapshot.agents : null
+    readonly property var agentHistory: agents ? agents.history : ({"labels": [], "values": []})
+    readonly property var tokenHistory: agents ? agents.token_history : ({"labels": [], "values": []})
     readonly property real updated: snapshot ? snapshot.updated : 0
     property real nowSeconds: Date.now() / 1000
     property bool componentReady: false
@@ -74,8 +77,8 @@ PlasmoidItem {
     }
 
     fullRepresentation: PlasmaExtras.Representation {
-        Layout.minimumWidth: Kirigami.Units.gridUnit * 21
-        Layout.minimumHeight: Kirigami.Units.gridUnit * 24
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 25
+        Layout.minimumHeight: Kirigami.Units.gridUnit * 32
         collapseMarginsHint: true
 
         ColumnLayout {
@@ -101,7 +104,7 @@ PlasmoidItem {
             GridLayout {
                 Layout.fillWidth: true
                 Layout.topMargin: Kirigami.Units.smallSpacing
-                columns: 4
+                columns: 5
                 columnSpacing: Kirigami.Units.smallSpacing
                 rowSpacing: Kirigami.Units.smallSpacing
 
@@ -114,7 +117,9 @@ PlasmoidItem {
                         {"icon": "go-down", "valueText": root.formatBytes(root.metric("network_rx_bytes")),
                             "label": i18n("download")},
                         {"icon": "go-up", "valueText": root.formatBytes(root.metric("network_tx_bytes")),
-                            "label": i18n("upload")}
+                            "label": i18n("upload")},
+                        {"icon": "view-statistics", "valueText": root.tokenText(),
+                            "label": i18n("tokens"), "tokens": true}
                     ]
 
                     RowLayout {
@@ -136,6 +141,10 @@ PlasmoidItem {
                                 text: modelData.valueText
                                 font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.3
                                 font.bold: true
+                                PlasmaComponents3.ToolTip.text: modelData.tokens === true ? root.tokenDetail() : ""
+                                PlasmaComponents3.ToolTip.visible: modelData.tokens === true && tokenHover.hovered
+                                PlasmaComponents3.ToolTip.delay: 200
+                                HoverHandler { id: tokenHover }
                             }
 
                             PlasmaComponents3.Label {
@@ -146,6 +155,15 @@ PlasmoidItem {
                         }
                     }
                 }
+            }
+
+            PlasmaComponents3.Label {
+                visible: root.agents !== null && root.agents.token_status !== "ok"
+                text: root.agents ? (root.agents.token_status === "initializing"
+                    ? i18n("Reading local token usage…") : root.agents.token_error) : ""
+                color: Kirigami.Theme.negativeTextColor
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
             }
 
             Kirigami.Separator {
@@ -294,6 +312,52 @@ PlasmoidItem {
                 Layout.preferredHeight: Kirigami.Units.gridUnit * 3
             }
 
+            PlasmaComponents3.Label {
+                text: i18n("Active agents (24h)")
+                font.bold: true
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.smallSpacing
+            }
+
+            ActivityGraph {
+                values: root.agentHistory.values
+                labels: root.agentHistory.labels
+                tooltipText: function(index) {
+                    return i18n("%1:00 — %2 working agents on average", root.agentHistory.labels[index],
+                        root.agentHistory.values[index].toLocaleString(Qt.locale(), 'f', 2));
+                }
+                Layout.fillWidth: true
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 3
+            }
+
+            PlasmaComponents3.Label {
+                visible: root.agents !== null && root.agents.status === "error"
+                text: root.agents ? root.agents.error : ""
+                color: Kirigami.Theme.negativeTextColor
+                opacity: 0.7
+                wrapMode: Text.WordWrap
+                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                Layout.fillWidth: true
+            }
+
+            PlasmaComponents3.Label {
+                text: i18n("Token usage (24h)")
+                font.bold: true
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.smallSpacing
+            }
+
+            ActivityGraph {
+                values: root.tokenHistory.values
+                labels: root.tokenHistory.labels
+                tooltipText: function(index) {
+                    return i18n("%1:00 — %2 tokens", root.tokenHistory.labels[index],
+                        root.formatTokenUsage(root.tokenHistory.values[index]));
+                }
+                Layout.fillWidth: true
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 3
+            }
+
             Item {
                 Layout.fillHeight: true
             }
@@ -380,7 +444,7 @@ PlasmoidItem {
             }
             state = JSON.parse(String(stateJson));
             if (!validState(state)) {
-                throw new TypeError("payload does not match schema 3");
+                throw new TypeError("payload does not match schema 5");
             }
         } catch (error) {
             reportStateError(i18n("The daemon returned unreadable state: %1", String(error)));
@@ -412,7 +476,7 @@ PlasmoidItem {
     function validState(state) {
         const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
         const nonnegative = value => typeof value === "number" && isFinite(value) && value >= 0;
-        if (!object(state) || state.schema !== 3 || typeof state.instance !== "string"
+        if (!object(state) || state.schema !== 5 || typeof state.instance !== "string"
                 || state.instance.length === 0 || !nonnegative(state.revision)
                 || Math.floor(state.revision) !== state.revision
                 || !nonnegative(state.updated) || state.updated === 0) {
@@ -420,6 +484,9 @@ PlasmoidItem {
         }
         const activity = state.activity;
         const net = state.network;
+        const agents = state.agents;
+        const agentHistory = object(agents) ? agents.history : null;
+        const tokenHistory = object(agents) ? agents.token_history : null;
         const history = object(net) ? net.history : null;
         const metrics = ["keystrokes", "click_left", "click_right", "click_middle",
             "click_side", "click_extra", "scroll_wheel", "scroll_touchpad",
@@ -437,7 +504,24 @@ PlasmoidItem {
                 && history.labels.length === 24 && history.rx_bytes.length === 24
                 && history.tx_bytes.length === 24
                 && history.labels.every(label => typeof label === "string")
-                && history.rx_bytes.every(nonnegative) && history.tx_bytes.every(nonnegative);
+                && history.rx_bytes.every(nonnegative) && history.tx_bytes.every(nonnegative)
+            && object(agents) && ["initializing", "ok", "error"].indexOf(agents.status) >= 0
+                && typeof agents.error === "string" && nonnegative(agents.sampled_at)
+                && (agents.status !== "ok" || (nonnegative(agents.working) && nonnegative(agents.idle)
+                    && Number.isInteger(agents.working) && Number.isInteger(agents.idle)))
+                && ["initializing", "ok", "error"].indexOf(agents.token_status) >= 0
+                && typeof agents.token_error === "string" && nonnegative(agents.token_updated)
+                && object(agents.tokens) && (agents.token_updated === 0 ||
+                    ["pi", "claude", "codex"].every(key => object(agents.tokens[key])
+                        && nonnegative(agents.tokens[key].read) && nonnegative(agents.tokens[key].write)))
+            && object(agentHistory) && Array.isArray(agentHistory.labels) && Array.isArray(agentHistory.values)
+                && agentHistory.labels.length === 24 && agentHistory.values.length === 24
+                && agentHistory.labels.every(label => typeof label === "string")
+                && agentHistory.values.every(nonnegative)
+            && object(tokenHistory) && Array.isArray(tokenHistory.labels) && Array.isArray(tokenHistory.values)
+                && tokenHistory.labels.length === 24 && tokenHistory.values.length === 24
+                && tokenHistory.labels.every(label => typeof label === "string")
+                && tokenHistory.values.every(nonnegative);
     }
 
     function reportStateError(message) {
@@ -478,6 +562,34 @@ PlasmoidItem {
         // Explicit 'f',0: Qt's toLocaleString defaults to 2 decimals, which
         // renders every whole-number count as "289,713.00".
         return Math.round(value).toLocaleString(Qt.locale(), 'f', 0);
+    }
+
+    function tokenTotals() {
+        if (!agents || !["pi", "claude", "codex"].every(key => agents.tokens[key])) return null;
+        let read = 0, write = 0;
+        for (const key of ["pi", "claude", "codex"]) {
+            read += agents.tokens[key].read;
+            write += agents.tokens[key].write;
+        }
+        return {read: read, write: write};
+    }
+
+    function formatTokenUsage(value) {
+        if (value >= 1e9) return (value / 1e9).toLocaleString(Qt.locale(), 'f', 0) + "B";
+        if (value >= 1e6) return (value / 1e6).toLocaleString(Qt.locale(), 'f', 0) + "M";
+        if (value >= 1e3) return (value / 1e3).toLocaleString(Qt.locale(), 'f', 0) + "K";
+        return formatFull(value);
+    }
+
+    function tokenText() {
+        const usage = tokenTotals();
+        return usage ? ((usage.read + usage.write) / 1e9).toLocaleString(Qt.locale(), 'f', 0) + "B" : "—";
+    }
+
+    function tokenDetail() {
+        const usage = tokenTotals();
+        return usage ? i18n("Pi + Claude + Codex\n%1 read (input + cache) + %2 write (output) tokens",
+            formatFull(usage.read), formatFull(usage.write)) : i18n("Token usage not yet available");
     }
 
     function formatBytes(value) {

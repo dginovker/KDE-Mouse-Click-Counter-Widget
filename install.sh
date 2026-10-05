@@ -29,7 +29,7 @@ python3 - "$(plasmashell --version)" <<'PY'
 import ctypes, json, re, sys
 from pathlib import Path
 
-for path in ("daemon/kdeclickd.py", "daemon/libinput_ffi.py"):
+for path in ("daemon/kdeclickd.py", "daemon/libinput_ffi.py", "daemon/agent_analytics.py", "daemon/agent_count_service.py"):
     compile(Path(path).read_bytes(), path, "exec")
 metadata = json.loads(Path("plasmoid/metadata.json").read_text())
 main_qml = Path("plasmoid/contents/ui/main.qml").read_text()
@@ -49,17 +49,23 @@ try:
 except Exception as error:
     raise SystemExit(f"ERROR: libinput, dbus-python, PyGObject GLib, and session D-Bus are required: {error}")
 PY
+AGENT_HELPER="${XDG_DATA_HOME:-$HOME/.local/share}/plasma/plasmoids/local.aiusage.rings/contents/code/widget_agents.py"
+[[ -f "$AGENT_HELPER" ]] || die "install AI Usage Rings first; missing live agent counter: $AGENT_HELPER"
 qmllint plasmoid/contents/ui/main.qml
 # A known executable lets this syntax check work on a first installation too.
 UNIT_CHECK="$(mktemp --suffix=.service)"
 sed 's|^ExecStart=.*|ExecStart=/bin/true|' systemd/kdeclickd.service > "$UNIT_CHECK"
 systemd-analyze --user verify "$UNIT_CHECK" || { rm -f -- "$UNIT_CHECK"; exit 1; }
 rm -f -- "$UNIT_CHECK"
+systemd-analyze --user verify systemd/kdeagentcounts.service
 
 mkdir -p "$DAEMON_DIR" "$DATA_DIR" "$UNIT_DIR"
 install -m 0755 daemon/kdeclickd.py "$DAEMON_DIR/kdeclickd.py.installing"
 install -m 0644 daemon/libinput_ffi.py "$DAEMON_DIR/libinput_ffi.py.installing"
+install -m 0644 daemon/agent_analytics.py "$DAEMON_DIR/agent_analytics.py.installing"
+install -m 0644 daemon/agent_count_service.py "$DAEMON_DIR/agent_count_service.py.installing"
 install -m 0644 systemd/kdeclickd.service "$UNIT_DIR/kdeclickd.service.installing"
+install -m 0644 systemd/kdeagentcounts.service "$UNIT_DIR/kdeagentcounts.service.installing"
 
 OLD_PID=0
 if systemctl --user cat kdeclickd.service >/dev/null 2>&1; then
@@ -119,10 +125,14 @@ fi
 
 mv -f -- "$DAEMON_DIR/kdeclickd.py.installing" "$DAEMON_DIR/kdeclickd.py"
 mv -f -- "$DAEMON_DIR/libinput_ffi.py.installing" "$DAEMON_DIR/libinput_ffi.py"
+mv -f -- "$DAEMON_DIR/agent_analytics.py.installing" "$DAEMON_DIR/agent_analytics.py"
+mv -f -- "$DAEMON_DIR/agent_count_service.py.installing" "$DAEMON_DIR/agent_count_service.py"
 mv -f -- "$UNIT_DIR/kdeclickd.service.installing" "$UNIT_DIR/kdeclickd.service"
+mv -f -- "$UNIT_DIR/kdeagentcounts.service.installing" "$UNIT_DIR/kdeagentcounts.service"
 
 systemctl --user daemon-reload
-systemctl --user enable kdeclickd.service
+systemctl --user enable kdeclickd.service kdeagentcounts.service
+systemctl --user restart kdeagentcounts.service
 if ! systemctl --user restart kdeclickd.service; then
     systemctl --user status kdeclickd.service --no-pager --lines=30 >&2 || :
     die "the replacement daemon failed to start; stats.db was not removed"
@@ -132,16 +142,36 @@ NEW_PID="$(systemctl --user show kdeclickd.service -p MainPID --value)"
 [[ "$OLD_PID" == 0 || "$NEW_PID" != "$OLD_PID" ]] || die "the daemon PID did not change"
 
 if ! python3 - "$BUS_NAME" "$OBJECT_PATH" "$INTERFACE" "$BACKUP_PATH" <<'PY'
-import dbus, json, math, sqlite3, sys
+import dbus, json, math, sqlite3, sys, time
 
 bus_name, object_path, interface, checkpoint = sys.argv[1:]
 try:
     proxy = dbus.SessionBus().get_object(bus_name, object_path, introspect=False)
-    state = json.loads(str(dbus.Interface(proxy, interface).GetState(timeout=5)))
+    for attempt in range(10):
+        state = json.loads(str(dbus.Interface(proxy, interface).GetState(timeout=5)))
+        if state.get("agents", {}).get("status") == "ok":
+            break
+        time.sleep(0.5)
 except Exception as error:
     raise SystemExit(f"ERROR: D-Bus GetState failed: {error}")
-if state.get("schema") != 3 or not isinstance(state.get("totals"), dict):
-    raise SystemExit("ERROR: D-Bus GetState did not return schema 3 totals")
+if state.get("schema") != 5 or not isinstance(state.get("totals"), dict):
+    raise SystemExit("ERROR: D-Bus GetState did not return schema 5 totals")
+agents = state.get("agents")
+agent_history = agents.get("history") if isinstance(agents, dict) else None
+if (not isinstance(agents, dict) or agents.get("status") != "ok"
+        or not isinstance(agent_history, dict)
+        or not all(isinstance(agent_history.get(key), list) and len(agent_history[key]) == 24
+                   for key in ("labels", "values"))
+        or not all(isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+                   for value in agent_history["values"])):
+    raise SystemExit(f"ERROR: D-Bus GetState did not return working agent counts and 24 valid history buckets: {agents}")
+token_history = agents.get("token_history")
+if (not isinstance(token_history, dict)
+        or not all(isinstance(token_history.get(key), list) and len(token_history[key]) == 24
+                   for key in ("labels", "values"))
+        or not all(isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+                   for value in token_history["values"])):
+    raise SystemExit("ERROR: D-Bus GetState did not return 24 valid token history buckets")
 network = state.get("network")
 history = network.get("history") if isinstance(network, dict) else None
 if (not isinstance(history, dict)
@@ -200,6 +230,6 @@ fi
 # At this point SQLite and D-Bus have replaced both jobs the old file performed.
 rm -f -- "$STATE_PATH" "$STATE_TEMP_PATH"
 
-echo "Done. kdeclickd PID $NEW_PID is publishing schema 3 over D-Bus."
+echo "Done. kdeclickd PID $NEW_PID is publishing schema 5 over D-Bus."
 echo "Database: $DB_PATH"
 [[ -z "$BACKUP_PATH" ]] || echo "Backup:   $BACKUP_PATH"

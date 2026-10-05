@@ -1,6 +1,8 @@
 [Unit]
 Description=Input and network analytics daemon for the Click Analytics widget
 Documentation=https://github.com/dginovker/KDEClickAnalytics
+Wants=kdeagentcounts.service
+After=kdeagentcounts.service
 
 [Service]
 Type=dbus

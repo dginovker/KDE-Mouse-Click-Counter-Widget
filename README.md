@@ -3,8 +3,9 @@
 *Because I couldn't come up with a better name.*
 
 A Plasma widget that tracks clicks, keystrokes, scrolling, pointer travel, and
-network upload/download totals. It records counts only: key identities and
-network contents are never collected.
+network upload/download totals, lifetime Pi/Claude/Codex token usage, and hourly
+working-agent averages. It records counts and usage metadata only: key identities,
+network contents, and agent conversation contents are never collected.
 
 ![Click Analytics widget](https://github.com/user-attachments/assets/b3d8f483-26bc-4713-8f03-2a1af6990bb3)
 
@@ -14,6 +15,7 @@ network contents are never collected.
 - Python 3 with `dbus-python` and PyGObject's GLib bindings
 - `libinput.so.10`
 - Membership in the `input` group, with readable `/dev/input/event*` devices
+- AI Usage Rings (`local.aiusage.rings`) installed with its live agent counter
 
 Run:
 
@@ -58,6 +60,45 @@ The popup graphs both input actions and downloaded/uploaded bytes across the
 last 24 hourly buckets. Download and upload share one scale so their relative
 sizes are not exaggerated.
 
+## Agent statistics
+
+Under **Totals**, one combined lifetime read + write token total sums Pi,
+Claude, and Codex and displays it in whole billions (for example, `267B`) on
+the same row as the other totals. Hover for
+the split: read means input, including cache reads and cache creation; write
+means output, including reasoning already included by the agent.
+Codex's cached-input and reasoning-output subsets are not added twice. Local
+session logs, including subagents and archived Codex sessions, are imported once
+and checked for appended records every minute. Replayed messages and streaming
+updates are deduplicated. File offsets and usage metadata are stored in
+`stats.db`; deleting or moving a source log does not erase previously imported
+usage. `PI_CODING_AGENT_DIR`, `CLAUDE_HOME`, and `CODEX_HOME` select the session
+roots when set on the daemon. No credentials, prompts, or replies are stored.
+
+The **Token usage (24h)** chart sums the same combined read + write usage in
+each hourly bucket, not cumulative lifetime usage. It updates every minute and
+backfills from available session timestamps. Replayed and streamed messages are
+counted once; Codex cumulative counters contribute only their increments.
+
+The **Active agents (24h)** bar chart uses the same working/idle classification
+as AI Usage Rings: main Konsole agents, excluding subagents and headless agents.
+A read-only `kdeagentcounts` session D-Bus service runs the existing counter
+without a mount/user namespace; this is necessary to inspect same-user `/proc`
+metadata while preserving the input daemon's sandbox. The daemon samples it
+every five seconds on a separate thread. Each bar
+is working-agent-seconds divided by 3,600, so four agents working for half an
+hour average two. The current hour divides by elapsed wall-clock time instead.
+Sleep, daemon downtime, failed lookups, and gaps longer than fifteen seconds
+contribute zero; the last count is never extended across these gaps. Agent
+history begins with installation, not with an invented retrospective estimate.
+Counts and token-import failures are shown explicitly in the popup and journal.
+
+Run the regression tests with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
 ## Network-byte semantics
 
 Once per second the daemon reads Linux's `/proc/net/dev` counters for the one
@@ -77,6 +118,6 @@ negative delta.
 ## Troubleshooting
 
 ```bash
-journalctl --user -u kdeclickd -f
-systemctl --user status kdeclickd
+journalctl --user -u kdeclickd -u kdeagentcounts -f
+systemctl --user status kdeclickd kdeagentcounts
 ```

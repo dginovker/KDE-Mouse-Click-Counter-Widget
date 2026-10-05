@@ -1,0 +1,15 @@
+[Unit]
+Description=Read-only local AI agent counts for Click Analytics
+
+[Service]
+Type=dbus
+BusName=io.github.dginovker.KDEAgentCounts
+ExecStart=/usr/bin/python3 %h/.local/lib/kdeclick/agent_count_service.py
+Restart=on-failure
+RestartSec=5
+# A mount/user namespace prevents same-user reads of agent /proc metadata.
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=default.target

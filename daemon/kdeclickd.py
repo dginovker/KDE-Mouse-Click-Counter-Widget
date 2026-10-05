@@ -28,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import libinput_ffi as li
+from agent_analytics import AgentAnalytics
 
 DATA_DIR = Path(
     os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")
@@ -41,12 +42,12 @@ NETWORK_SAMPLE_SECONDS = 1.0
 DBUS_SERVICE = "io.github.dginovker.KDEClickAnalytics"
 DBUS_PATH = "/io/github/dginovker/KDEClickAnalytics"
 DBUS_INTERFACE = "io.github.dginovker.KDEClickAnalytics1"
-STATE_SCHEMA = 3
+STATE_SCHEMA = 5
 
 # Counted as "actions" in the activity graph.
 ACTION_METRICS = ("keystrokes", "click_left", "click_right", "click_middle")
 NETWORK_METRICS = ("network_rx_bytes", "network_tx_bytes")
-GRAPH_METRICS = ACTION_METRICS + NETWORK_METRICS
+GRAPH_METRICS = ACTION_METRICS + NETWORK_METRICS + ("agent_working_seconds",)
 DISPLAY_METRICS = ACTION_METRICS + (
     "click_side",
     "click_extra",
@@ -88,14 +89,14 @@ class Counters:
 
     def _current_bucket(self, now):
         # Recomputed only when the hour rolls over, not per event.
-        if now >= self._bucket_expires:
+        if now >= self._bucket_expires or now < self._bucket_expires - 3600:
             local = time.localtime(now)
             self._bucket = time.strftime("%Y-%m-%d %H", local)
-            self._bucket_expires = now - (local.tm_min * 60 + local.tm_sec) + 3600
+            self._bucket_expires = now - (local.tm_min * 60 + local.tm_sec) - now % 1 + 3600
         return self._bucket
 
-    def bump(self, metric, amount=1.0):
-        now = time.time()
+    def bump(self, metric, amount=1.0, when=None):
+        now = time.time() if when is None else when
         with self._lock:
             bucket = self._current_bucket(now)
             self._pending[(bucket, metric)] += amount
@@ -486,6 +487,7 @@ class Daemon:
 
         self.counters = Counters(totals, hourly)
         self.network = NetworkSampler(self.counters)
+        self.agents = AgentAnalytics(self.counters, self.db_path, log)
         self.context = li.create_context()
         self.added = {}
         self.stop_event = threading.Event()
@@ -545,7 +547,8 @@ class Daemon:
             totals.setdefault(metric, 0.0)
         now = time.time()
 
-        values, rx_bytes, tx_bytes, labels = [], [], [], []
+        token_hourly = self.agents.token_hourly()
+        values, rx_bytes, tx_bytes, agent_values, token_values, labels = [], [], [], [], [], []
         for offset in range(23, -1, -1):
             moment = now - offset * 3600
             bucket = bucket_for(moment)
@@ -553,6 +556,10 @@ class Daemon:
                               for metric in ACTION_METRICS))
             rx_bytes.append(hourly.get((bucket, "network_rx_bytes"), 0.0))
             tx_bytes.append(hourly.get((bucket, "network_tx_bytes"), 0.0))
+            local = time.localtime(now)
+            denominator = local.tm_min * 60 + local.tm_sec + now % 1 if offset == 0 else 3600
+            agent_values.append(hourly.get((bucket, "agent_working_seconds"), 0.0) / max(1, denominator))
+            token_values.append(token_hourly.get(bucket, 0))
             labels.append(time.strftime("%H", time.localtime(moment)))
 
         network = self.network.snapshot()
@@ -561,6 +568,9 @@ class Daemon:
             "rx_bytes": rx_bytes,
             "tx_bytes": tx_bytes,
         }
+        agents = self.agents.snapshot()
+        agents["history"] = {"labels": labels, "values": agent_values}
+        agents["token_history"] = {"labels": labels, "values": token_values}
         self._revision += 1
         payload = {
             "schema": STATE_SCHEMA,
@@ -570,6 +580,7 @@ class Daemon:
             "totals": totals,
             "activity": {"values": values, "labels": labels},
             "network": network,
+            "agents": agents,
         }
         return json.dumps(payload, separators=(",", ":"), allow_nan=False)
 
@@ -678,6 +689,7 @@ class Daemon:
             if not self.flush_ready.wait(10.0):
                 raise RuntimeError("timed out while opening the statistics database")
             self._raise_if_fatal()
+            self.agents.start(self.stop_event, self._record_fatal)
 
             if production:
                 publisher = DBusPublisher(self.build_state(), self._record_fatal)
@@ -724,6 +736,8 @@ class Daemon:
             except BaseException as exc:
                 self._record_fatal(RuntimeError(f"final network sample failed: {exc}"))
 
+            self.stop_event.set()
+            self.agents.stop()
             self.flush_stop_event.set()
             if flusher_started:
                 flusher.join()
