@@ -42,7 +42,7 @@ NETWORK_SAMPLE_SECONDS = 1.0
 DBUS_SERVICE = "io.github.dginovker.KDEClickAnalytics"
 DBUS_PATH = "/io/github/dginovker/KDEClickAnalytics"
 DBUS_INTERFACE = "io.github.dginovker.KDEClickAnalytics1"
-STATE_SCHEMA = 5
+STATE_SCHEMA = 6
 
 # Counted as "actions" in the activity graph.
 ACTION_METRICS = ("keystrokes", "click_left", "click_right", "click_middle")
@@ -345,9 +345,10 @@ class NetworkSampler:
 class DBusPublisher:
     """Owns all dbus-python objects on one GLib event-loop thread."""
 
-    def __init__(self, initial_payload, fatal_callback):
+    def __init__(self, initial_payload, fatal_callback, token_refresh_callback):
         self._initial_payload = initial_payload
         self._fatal_callback = fatal_callback
+        self._token_refresh_callback = token_refresh_callback
         self._lock = threading.Lock()
         self._ready = threading.Event()
         self._thread = self._glib = self._loop = self._object = None
@@ -393,6 +394,8 @@ class DBusPublisher:
             import dbus.service
             from gi.repository import GLib
 
+            refresh_tokens = self._token_refresh_callback
+
             class StateService(dbus.service.Object):
                 def __init__(self, bus_name, payload):
                     super().__init__(bus_name, DBUS_PATH)
@@ -401,6 +404,10 @@ class DBusPublisher:
                 @dbus.service.method(DBUS_INTERFACE, in_signature="", out_signature="s")
                 def GetState(self):
                     return self._payload
+
+                @dbus.service.method(DBUS_INTERFACE, in_signature="", out_signature="")
+                def RefreshTokens(self):
+                    refresh_tokens()
 
                 @dbus.service.signal(DBUS_INTERFACE, signature="s")
                 def StateChanged(self, payload):
@@ -559,7 +566,7 @@ class Daemon:
             local = time.localtime(now)
             denominator = local.tm_min * 60 + local.tm_sec + now % 1 if offset == 0 else 3600
             agent_values.append(hourly.get((bucket, "agent_working_seconds"), 0.0) / max(1, denominator))
-            token_values.append(token_hourly.get(bucket, 0))
+            token_values.append(token_hourly.get(bucket, 0) / max(1, denominator))
             labels.append(time.strftime("%H", time.localtime(moment)))
 
         network = self.network.snapshot()
@@ -692,7 +699,7 @@ class Daemon:
             self.agents.start(self.stop_event, self._record_fatal)
 
             if production:
-                publisher = DBusPublisher(self.build_state(), self._record_fatal)
+                publisher = DBusPublisher(self.build_state(), self._record_fatal, self.agents.request_tokens)
                 publisher.start()
                 log(f"publishing live state on session D-Bus as {DBUS_SERVICE}")
 

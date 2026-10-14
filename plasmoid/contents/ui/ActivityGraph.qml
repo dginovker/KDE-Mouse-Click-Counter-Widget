@@ -12,22 +12,19 @@ Item {
     property color secondaryColor: Kirigami.Theme.positiveTextColor
     property var tooltipText: null
 
-    readonly property bool paired: secondaryValues.length === values.length
+    readonly property bool stacked: secondaryValues.length === values.length
         && values.length > 0
 
     readonly property real maximum: {
         var peak = 0;
         for (var i = 0; i < values.length; i++) {
-            peak = Math.max(peak, values[i]);
-            if (paired) {
-                peak = Math.max(peak, secondaryValues[i]);
-            }
+            peak = Math.max(peak, values[i] + (stacked ? secondaryValues[i] : 0));
         }
         return peak;
     }
 
     function barHeight(value) {
-        return Math.max(1, maximum > 0 ? value / maximum * bars.height : 1);
+        return maximum > 0 ? value / maximum * bars.height : 0;
     }
 
     function baselineColor() {
@@ -62,13 +59,12 @@ Item {
                 Accessible.name: graph.tooltipFor(index)
 
                 Rectangle {
+                    id: primaryBar
                     anchors.bottom: parent.bottom
-                    anchors.left: parent.left
-                    width: graph.paired ? (parent.width - 1) / 2 : parent.width
-                    // A floor of 1px keeps empty hours visible as a baseline, so
-                    // "no activity" reads as a measured zero rather than a gap
-                    // where the graph failed to draw.
-                    height: graph.barHeight(graph.values[index])
+                    width: parent.width
+                    // Only empty hours need a baseline; zero segments must not inflate a stack.
+                    height: graph.values[index] > 0 || (graph.stacked && graph.secondaryValues[index] > 0)
+                        ? graph.barHeight(graph.values[index]) : 1
                     radius: width > 3 ? 1 : 0
                     color: graph.values[index] > 0
                         ? graph.primaryColor : graph.baselineColor()
@@ -82,14 +78,13 @@ Item {
                 }
 
                 Rectangle {
-                    visible: graph.paired
-                    anchors.bottom: parent.bottom
-                    anchors.right: parent.right
-                    width: (parent.width - 1) / 2
-                    height: graph.paired
-                        ? graph.barHeight(graph.secondaryValues[index]) : 1
+                    visible: graph.stacked
+                    anchors.bottom: primaryBar.top
+                    width: parent.width
+                    height: graph.stacked
+                        ? graph.barHeight(graph.secondaryValues[index]) : 0
                     radius: width > 3 ? 1 : 0
-                    color: graph.paired && graph.secondaryValues[index] > 0
+                    color: graph.stacked && graph.secondaryValues[index] > 0
                         ? graph.secondaryColor : graph.baselineColor()
 
                     Behavior on height {

@@ -147,24 +147,34 @@ import dbus, json, math, sqlite3, sys, time
 bus_name, object_path, interface, checkpoint = sys.argv[1:]
 try:
     proxy = dbus.SessionBus().get_object(bus_name, object_path, introspect=False)
-    for attempt in range(10):
+    dbus.Interface(proxy, interface).RefreshTokens(timeout=5)
+    for attempt in range(60):
         state = json.loads(str(dbus.Interface(proxy, interface).GetState(timeout=5)))
-        if state.get("agents", {}).get("status") == "ok":
+        if (state.get("agents", {}).get("status") in ("ok", "error")
+                and state["agents"].get("token_tps") is not None):
             break
         time.sleep(0.5)
 except Exception as error:
     raise SystemExit(f"ERROR: D-Bus GetState failed: {error}")
-if state.get("schema") != 5 or not isinstance(state.get("totals"), dict):
-    raise SystemExit("ERROR: D-Bus GetState did not return schema 5 totals")
+if state.get("schema") != 6 or not isinstance(state.get("totals"), dict):
+    raise SystemExit("ERROR: D-Bus GetState did not return schema 6 totals")
 agents = state.get("agents")
 agent_history = agents.get("history") if isinstance(agents, dict) else None
-if (not isinstance(agents, dict) or agents.get("status") != "ok"
+if (not isinstance(agents, dict) or agents.get("status") not in ("ok", "error")
+        or not isinstance(agents.get("token_tps"), (int, float))
+        or not math.isfinite(agents["token_tps"]) or agents["token_tps"] < 0
         or not isinstance(agent_history, dict)
         or not all(isinstance(agent_history.get(key), list) and len(agent_history[key]) == 24
                    for key in ("labels", "values"))
         or not all(isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
                    for value in agent_history["values"])):
-    raise SystemExit(f"ERROR: D-Bus GetState did not return working agent counts and 24 valid history buckets: {agents}")
+    raise SystemExit(f"ERROR: D-Bus GetState did not return token throughput and 24 valid agent history buckets: {agents}")
+if agents["status"] == "error":
+    if not agents.get("error"):
+        raise SystemExit("ERROR: agent count failure has no diagnostic")
+    print(f"WARNING: agent counts are unavailable; the widget will report: {agents['error']}", file=sys.stderr)
+if agents.get("warning"):
+    print(f"WARNING: counting registered agents only: {agents['warning']}", file=sys.stderr)
 token_history = agents.get("token_history")
 if (not isinstance(token_history, dict)
         or not all(isinstance(token_history.get(key), list) and len(token_history[key]) == 24
@@ -230,6 +240,6 @@ fi
 # At this point SQLite and D-Bus have replaced both jobs the old file performed.
 rm -f -- "$STATE_PATH" "$STATE_TEMP_PATH"
 
-echo "Done. kdeclickd PID $NEW_PID is publishing schema 5 over D-Bus."
+echo "Done. kdeclickd PID $NEW_PID is publishing schema 6 over D-Bus."
 echo "Database: $DB_PATH"
 [[ -z "$BACKUP_PATH" ]] || echo "Backup:   $BACKUP_PATH"

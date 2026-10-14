@@ -44,7 +44,8 @@ synchronously during a clean shutdown. The daemon loads those rows into memory
 at startup and pushes complete live snapshots to every widget over the local
 session D-Bus. There is no file polling or `state.json` transport.
 
-The D-Bus service is read-only:
+The D-Bus service exposes read-only statistics and a `RefreshTokens` request
+that temporarily enables live sampling without changing stored totals:
 
 ```text
 service    io.github.dginovker.KDEClickAnalytics
@@ -57,8 +58,8 @@ snapshots make missed signals self-healing instead of making the widget depend
 on a sequence of deltas.
 
 The popup graphs both input actions and downloaded/uploaded bytes across the
-last 24 hourly buckets. Download and upload share one scale so their relative
-sizes are not exaggerated.
+last 24 hourly buckets. Download and upload stack into one bar per hour;
+the combined bytes determine its height.
 
 ## Agent statistics
 
@@ -69,29 +70,52 @@ the split: read means input, including cache reads and cache creation; write
 means output, including reasoning already included by the agent.
 Codex's cached-input and reasoning-output subsets are not added twice. Local
 session logs, including subagents and archived Codex sessions, are imported once
-and checked for appended records every minute. Replayed messages and streaming
-updates are deduplicated. File offsets and usage metadata are stored in
+and watched with Linux inotify. Only changed log files are checked for appended
+records; new directories and atomically replaced files are tracked too.
+Replayed messages and streaming updates are deduplicated. File offsets and usage metadata are stored in
 `stats.db`; deleting or moving a source log does not erase previously imported
 usage. `PI_CODING_AGENT_DIR`, `CLAUDE_HOME`, and `CODEX_HOME` select the session
 roots when set on the daemon. No credentials, prompts, or replies are stored.
 
-The **Token usage (24h)** chart sums the same combined read + write usage in
-each hourly bucket, not cumulative lifetime usage. It updates every minute and
-backfills from available session timestamps. Replayed and streamed messages are
-counted once; Codex cumulative counters contribute only their increments.
+The **Inference (24h)** chart shows average generated output tokens per second
+across Pi, Claude, and Codex, including subagents and headless agents. It excludes
+input and cache tokens; reasoning already included in provider output totals
+is counted once. Each hourly bucket divides output tokens by 3,600 for completed
+hours, or elapsed wall-clock seconds for the current hour. It updates every five
+seconds while the popup is open, and every sixty seconds while closed, and
+backfills from available session timestamps. Replayed and streamed
+messages are counted once; Codex cumulative counters contribute only increments.
+The heading also shows current aggregate output tokens/s from the change in
+lifetime output totals between scans, divided by actual elapsed seconds. This
+follows usage recorded in local logs, not individual streamed tokens; providers
+that report usage only when a response finishes can produce bursts. Lifetime
+read + write totals remain unchanged. Startup, failed scans, suspend, and gaps
+longer than fifteen seconds show an unavailable rate until two consecutive
+successful samples establish it. Opening the popup wakes the scanner immediately;
+its first live interval establishes the current TPS. Popup refresh requests keep
+a fifteen-second sampling lease alive, so multiple widgets work independently
+and a closed or crashed widget cannot leave fast sampling enabled permanently.
+A watcher failure or event-queue overflow is reported explicitly; it does not
+silently revert to full-tree polling. Restart `kdeclickd` after fixing the error
+to re-import any missed changes.
 
 The **Active agents (24h)** bar chart uses the same working/idle classification
 as AI Usage Rings: main Konsole agents, excluding subagents and headless agents.
 A read-only `kdeagentcounts` session D-Bus service runs the existing counter
 without a mount/user namespace; this is necessary to inspect same-user `/proc`
-metadata while preserving the input daemon's sandbox. The daemon samples it
-every five seconds on a separate thread. Each bar
+metadata while preserving the input daemon's sandbox. The count service permits
+IPv4 sockets because the Pi counter reads the local dashboard's HTTP API at
+`127.0.0.1:8040`; the input daemon remains restricted to Unix sockets. The daemon
+samples it every five seconds on a separate thread. Each bar
 is working-agent-seconds divided by 3,600, so four agents working for half an
 hour average two. The current hour divides by elapsed wall-clock time instead.
 Sleep, daemon downtime, failed lookups, and gaps longer than fifteen seconds
 contribute zero; the last count is never extended across these gaps. Agent
 history begins with installation, not with an invented retrospective estimate.
-Counts and token-import failures are shown explicitly in the popup and journal.
+Agents without live registration are omitted until they appear in a later poll;
+missing-registration diagnostics are logged in the journal, not shown as a
+widget error. Available registered agents continue contributing to history.
+Actual count-lookup and token-import failures are shown in the popup and journal.
 
 Run the regression tests with:
 

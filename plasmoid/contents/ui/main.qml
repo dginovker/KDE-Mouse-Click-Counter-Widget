@@ -341,7 +341,13 @@ PlasmoidItem {
             }
 
             PlasmaComponents3.Label {
-                text: i18n("Token usage (24h)")
+                text: i18n("Inference (24h) · %1 tokens/s now",
+                    root.agents && root.agents.token_tps !== null
+                        ? root.formatFull(root.agents.token_tps) : "—")
+                PlasmaComponents3.ToolTip.text: i18n("Generated output tokens/s across Pi, Claude, and Codex, including subagents. Excludes input and cache tokens. Updated every 5s from usage logs; providers may report tokens only when a response finishes.")
+                PlasmaComponents3.ToolTip.visible: tokenRateHover.hovered
+                PlasmaComponents3.ToolTip.delay: 200
+                HoverHandler { id: tokenRateHover }
                 font.bold: true
                 Layout.fillWidth: true
                 Layout.topMargin: Kirigami.Units.smallSpacing
@@ -351,8 +357,8 @@ PlasmoidItem {
                 values: root.tokenHistory.values
                 labels: root.tokenHistory.labels
                 tooltipText: function(index) {
-                    return i18n("%1:00 — %2 tokens", root.tokenHistory.labels[index],
-                        root.formatTokenUsage(root.tokenHistory.values[index]));
+                    return i18n("%1:00 — %2 output tokens/s on average", root.tokenHistory.labels[index],
+                        root.tokenHistory.values[index].toLocaleString(Qt.locale(), 'f', 2));
                 }
                 Layout.fillWidth: true
                 Layout.preferredHeight: Kirigami.Units.gridUnit * 3
@@ -392,6 +398,14 @@ PlasmoidItem {
         onTriggered: root.nowSeconds = Date.now() / 1000
     }
 
+    Timer {
+        interval: 5000
+        running: root.componentReady && root.expanded && serviceWatcher.registered
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: root.requestTokenRefresh()
+    }
+
     Component.onCompleted: {
         // Both watchers are complete now, so no update can land between the
         // initial method call and signal subscription.
@@ -413,6 +427,17 @@ PlasmoidItem {
 
         lastError = i18n("Waiting for the daemon's initial D-Bus state.");
         requestState(serviceEpoch);
+    }
+
+    function requestTokenRefresh() {
+        DBus.SessionBus.asyncCall({
+            "service": dbusService,
+            "path": dbusPath,
+            "iface": dbusInterface,
+            "member": "RefreshTokens"
+        }, function (reply) {}, function (reply) {
+            root.reportStateError(i18n("Token refresh failed: %1", reply.error.message));
+        });
     }
 
     function requestState(epoch) {
@@ -444,7 +469,7 @@ PlasmoidItem {
             }
             state = JSON.parse(String(stateJson));
             if (!validState(state)) {
-                throw new TypeError("payload does not match schema 5");
+                throw new TypeError("payload does not match schema 6");
             }
         } catch (error) {
             reportStateError(i18n("The daemon returned unreadable state: %1", String(error)));
@@ -476,7 +501,7 @@ PlasmoidItem {
     function validState(state) {
         const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
         const nonnegative = value => typeof value === "number" && isFinite(value) && value >= 0;
-        if (!object(state) || state.schema !== 5 || typeof state.instance !== "string"
+        if (!object(state) || state.schema !== 6 || typeof state.instance !== "string"
                 || state.instance.length === 0 || !nonnegative(state.revision)
                 || Math.floor(state.revision) !== state.revision
                 || !nonnegative(state.updated) || state.updated === 0) {
@@ -511,6 +536,8 @@ PlasmoidItem {
                     && Number.isInteger(agents.working) && Number.isInteger(agents.idle)))
                 && ["initializing", "ok", "error"].indexOf(agents.token_status) >= 0
                 && typeof agents.token_error === "string" && nonnegative(agents.token_updated)
+                && (agents.token_tps === null || nonnegative(agents.token_tps))
+                && (agents.token_status === "ok" || agents.token_tps === null)
                 && object(agents.tokens) && (agents.token_updated === 0 ||
                     ["pi", "claude", "codex"].every(key => object(agents.tokens[key])
                         && nonnegative(agents.tokens[key].read) && nonnegative(agents.tokens[key].write)))
@@ -572,13 +599,6 @@ PlasmoidItem {
             write += agents.tokens[key].write;
         }
         return {read: read, write: write};
-    }
-
-    function formatTokenUsage(value) {
-        if (value >= 1e9) return (value / 1e9).toLocaleString(Qt.locale(), 'f', 0) + "B";
-        if (value >= 1e6) return (value / 1e6).toLocaleString(Qt.locale(), 'f', 0) + "M";
-        if (value >= 1e3) return (value / 1e3).toLocaleString(Qt.locale(), 'f', 0) + "K";
-        return formatFull(value);
     }
 
     function tokenText() {
